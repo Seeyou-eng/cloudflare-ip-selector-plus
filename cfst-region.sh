@@ -20,12 +20,12 @@
 #    ./cfst-region.sh                      # 默认 SIN,NRT,HKG，每地区 Top 4
 #    ./cfst-region.sh "SIN,NRT"            # 只测指定地区
 #    ./cfst-region.sh "SIN,NRT" 6          # 指定地区 + 每地区取 6 个
-#    ./cfst-region.sh "SIN" 4 "电信优选"   # 自定义备注标签
 #
 #  输出（Mac：~/Desktop/Cloudflare优选IP/；Linux：~/Cloudflare优选IP/）：
 #    最优IP-汇总.txt / 全部结果.csv / SIN-新加坡.txt 等每地区一个文件
-#  每行格式：IP:443#SIN 电信优选[65ms 12.34Mbps]
-#    行首一定是数字 IP，延迟 200ms 以上不要，下载 0 的会标注出来
+#  每行格式：IP:443#新加坡 🇸🇬 62ms
+#    行首一定是数字 IP；国旗只能放 # 后面的备注里，放 IP 前面会失效
+#    延迟 200ms 以上不要；下载速度仍记在 全部结果.csv 里，不放在 txt 行里
 #
 #  依赖：同目录下的 cfst（v2.3.5）+ ip.txt，curl、python3
 #  测速前请先退出代理软件（Hiddify 等），否则延迟会失真
@@ -40,7 +40,6 @@ DL_URL_HTTP="http://speed.cloudflare.com/__down?bytes=50000000"
 
 COLOS="${1:-SIN,NRT,HKG}"
 TOP_N="${2:-4}"
-LABEL="${3:-电信优选}"
 PORT=443
 if [ "$(uname -s)" = "Darwin" ]; then
   OUT_DIR="${HOME}/Desktop/Cloudflare优选IP"
@@ -64,24 +63,32 @@ if [ ! -f result.csv ]; then
 fi
 
 echo "==> [2/2] 为延迟最低的 ${CANDIDATES} 个 IP 补测地区码 + 下载速度..."
-COLOS="$COLOS" TOP_N="$TOP_N" LABEL="$LABEL" PORT="$PORT" OUT_DIR="$OUT_DIR" \
+COLOS="$COLOS" TOP_N="$TOP_N" PORT="$PORT" OUT_DIR="$OUT_DIR" \
 CANDIDATES="$CANDIDATES" DL_URL_HTTPS="$DL_URL_HTTPS" DL_URL_HTTP="$DL_URL_HTTP" \
 env -u PYTHONPATH python3 << 'PYEOF'
 import csv, os, collections, datetime, subprocess, re
 
 colo_csv = os.environ["COLOS"]
 top_n = int(os.environ["TOP_N"])
-label = os.environ["LABEL"]
 port = os.environ["PORT"]
 out_dir = os.environ["OUT_DIR"]
 candidates_n = int(os.environ["CANDIDATES"])
 dl_https = os.environ["DL_URL_HTTPS"]
 dl_http = os.environ["DL_URL_HTTP"]
 
+# 地区码 -> (国家名, 国旗)，国旗只放 # 后面，绝不放 IP 前面
+COUNTRY = {
+    "SIN": ("新加坡", "🇸🇬"), "NRT": ("日本", "🇯🇵"),
+    "HKG": ("香港", "🇭🇰"), "TPE": ("台湾", "🇹🇼"), "KHH": ("台湾", "🇹🇼"),
+    "ICN": ("韩国", "🇰🇷"), "LAX": ("美国", "🇺🇸"), "SJC": ("美国", "🇺🇸"),
+    "SEA": ("美国", "🇺🇸"), "FRA": ("德国", "🇩🇪"),
+    "ORD": ("美国", "🇺🇸"), "DFW": ("美国", "🇺🇸"), "ATL": ("美国", "🇺🇸"),
+    "DEN": ("美国", "🇺🇸"), "EWR": ("美国", "🇺🇸"), "MIA": ("美国", "🇺🇸"),
+}
 REGION_NAMES = {
-    "HKG": "香港", "NRT": "东京", "KHH": "高雄", "TPE": "台北", "SIN": "新加坡",
-    "ICN": "首尔", "LAX": "洛杉矶", "SJC": "圣何塞", "SEA": "西雅图", "FRA": "法兰克福",
-    "ORD": "芝加哥", "DFW": "达拉斯", "ATL": "亚特兰大",
+    "HKG": "香港", "NRT": "日本", "KHH": "台湾", "TPE": "台湾", "SIN": "新加坡",
+    "ICN": "韩国", "LAX": "美国", "SJC": "美国", "SEA": "美国", "FRA": "德国",
+    "ORD": "美国", "DFW": "美国", "ATL": "美国",
 }
 requested = [c.strip().upper() for c in colo_csv.split(",") if c.strip()]
 
@@ -147,6 +154,7 @@ lines = [f"Cloudflare 优选 IP（{date_str}）", "=" * 60]
 
 for colo in requested:
     name = REGION_NAMES.get(colo, colo)
+    country, flag = COUNTRY.get(colo, (name, ""))
     if colo not in groups:
         lines.append(f"# {colo}（{name}）: 本轮未测到可用 IP")
         continue
@@ -155,8 +163,7 @@ for colo in requested:
     with open(os.path.join(out_dir, f"{colo}-{name}.txt"), "w", encoding="utf-8") as f:
         f.write(f"# {colo}（{name}）Cloudflare 优选 IP Top{len(top)}（{date_str}）\n")
         for lat, ip, mbps in top:
-            tag = f"{mbps:.2f}Mbps" if mbps > 0 else "下载0"
-            line = f"{ip}:{port}#{colo} {label}[{lat:.0f}ms {tag}]"
+            line = f"{ip}:{port}#{country} {flag} {lat:.0f}ms"
             lines.append(line)
             f.write(line + "\n")
 
@@ -165,9 +172,9 @@ extra = [c for c in groups if c not in requested and c != "N/A"]
 if extra:
     lines.append("# 其他地区（本轮测到，供参考）:")
     for colo in sorted(extra):
+        country, flag = COUNTRY.get(colo, (colo, ""))
         for lat, ip, mbps in sorted(groups[colo], key=lambda x: x[0])[:2]:
-            tag = f"{mbps:.2f}Mbps" if mbps > 0 else "下载0"
-            lines.append(f"{ip}:{port}#{colo} {label}[{lat:.0f}ms {tag}]")
+            lines.append(f"{ip}:{port}#{country} {flag} {lat:.0f}ms")
 
 with open(os.path.join(out_dir, "最优IP-汇总.txt"), "w", encoding="utf-8") as f:
     f.write("\n".join(lines) + "\n")
@@ -180,6 +187,6 @@ with open(os.path.join(out_dir, "全部结果.csv"), "w", encoding="utf-8-sig", 
 
 print("\n".join(lines))
 print(f"\n✅ 已更新: {out_dir}")
-print("   说明：下载 0 的已标注；若全部为 0，说明下载测速地址仍被拦，请换时间或换网络再测")
+print("   说明：下载速度记在 全部结果.csv 里；若下载全为 0，说明测速地址仍被拦，请换时间或换网络再测")
 PYEOF
 echo "==> 完成"

@@ -12,7 +12,7 @@
 
 **取自 chitongx/cloudflare-ip-selector（MIT）：**
 - 按地区筛选（SIN / NRT / HKG 等），每地区 Top N
-- 输出格式 `IP:443#SIN 电信优选[65ms 12.34Mbps]`，行首一定是数字 IP，可直接复制
+- 输出格式 `IP:443#新加坡 🇸🇬 62ms`，行首一定是数字 IP，可直接复制；国旗只放 `#` 后面，放 IP 前面会失效
 - 结果自动归档到桌面 `Cloudflare优选IP/` 文件夹：汇总 + 每地区一个文件 + 全量 CSV
 
 **本次新增的修复（2026-11-10 厦门电信实测）：**
@@ -26,6 +26,7 @@
 ```bash
 git clone https://github.com/Seeyou-eng/cloudflare-ip-selector-plus.git
 cd cloudflare-ip-selector-plus
+chmod +x install.sh cfst-region.sh   # GitHub 克隆后须先加执行权限
 ./install.sh        # 自动下载 cfst v2.3.5（Darwin arm64）
 # 国内网络加速: MIRROR='https://ghfast.top/' ./install.sh
 ./cfst-region.sh    # 开始测速，约 3 分钟
@@ -37,7 +38,6 @@ cd cloudflare-ip-selector-plus
 ./cfst-region.sh                      # 默认 SIN,NRT,HKG，每地区 Top 4
 ./cfst-region.sh "SIN,NRT"            # 只测指定地区
 ./cfst-region.sh "SIN,NRT" 6          # 指定地区 + 每地区取 6 个
-./cfst-region.sh "SIN" 4 "电信优选"   # 自定义备注标签
 ```
 
 运行后自动更新桌面 `Cloudflare优选IP/` 文件夹：
@@ -54,8 +54,8 @@ cd cloudflare-ip-selector-plus
 Cloudflare 优选 IP（2026-11-10）
 ============================================================
 # SIN（新加坡）:
-172.64.149.230:443#SIN 电信优选[71ms 2.48Mbps]
-104.18.42.218:443#SIN 电信优选[65ms 2.32Mbps]
+162.159.44.220:443#新加坡 🇸🇬 62ms
+162.159.32.242:443#新加坡 🇸🇬 63ms
 ```
 
 ## 测速前注意
