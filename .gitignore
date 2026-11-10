@@ -1,0 +1,6 @@
+cfst
+cfst_pkg
+result.csv
+*.zip
+*.tar.gz
+.DS_Store

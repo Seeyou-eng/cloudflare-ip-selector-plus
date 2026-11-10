@@ -1,0 +1,185 @@
+#!/usr/bin/env bash
+# ============================================================
+#  cfst-region.sh — Cloudflare 优选 IP（XIU2 引擎 + 地区筛选）
+#
+#  合并优点：
+#   - XIU2/CloudflareSpeedTest v2.3.5：核心测速引擎，延迟测速准确
+#   - chitongx/cloudflare-ip-selector：按地区筛选、桌面归档、
+#     干净可复制格式 IP:端口#地区码，延迟+下载双指标
+#
+#  针对 2026-11-10 实测问题的修复：
+#   1. cf.xiu2.xyz/url 已失效（403），不用
+#   2. cfst 自带下载用大文件（300MB）HTTPS 在厦门电信报 403，
+#      改为 curl 小文件补测：先 HTTPS 2MB，403/0 再试 HTTP 50MB
+#      （80 端口，绕 SNI 阻断）
+#   3. cfst 的 -httping 模式在部分网络下可用 IP 为 0（本机 Linux
+#      实测），改用 TCP 延迟测速（最稳）+ curl 响应头拿地区码：
+#      curl --resolve 拿到的响应头里有 `colo: SIN` 和 `CF-RAY: …-SIN`
+#
+#  用法：
+#    ./cfst-region.sh                      # 默认 SIN,NRT,HKG，每地区 Top 4
+#    ./cfst-region.sh "SIN,NRT"            # 只测指定地区
+#    ./cfst-region.sh "SIN,NRT" 6          # 指定地区 + 每地区取 6 个
+#    ./cfst-region.sh "SIN" 4 "电信优选"   # 自定义备注标签
+#
+#  输出（Mac：~/Desktop/Cloudflare优选IP/；Linux：~/Cloudflare优选IP/）：
+#    最优IP-汇总.txt / 全部结果.csv / SIN-新加坡.txt 等每地区一个文件
+#  每行格式：IP:443#SIN 电信优选[65ms 12.34Mbps]
+#    行首一定是数字 IP，延迟 200ms 以上不要，下载 0 的会标注出来
+#
+#  依赖：同目录下的 cfst（v2.3.5）+ ip.txt，curl、python3
+#  测速前请先退出代理软件（Hiddify 等），否则延迟会失真
+# ============================================================
+set -euo pipefail
+cd "$(dirname "$0")"
+
+CFST_BIN="./cfst"
+# 补测下载：先 HTTPS 2MB，失败再 HTTP 50MB
+DL_URL_HTTPS="https://speed.cloudflare.com/__down?bytes=2000000"
+DL_URL_HTTP="http://speed.cloudflare.com/__down?bytes=50000000"
+
+COLOS="${1:-SIN,NRT,HKG}"
+TOP_N="${2:-4}"
+LABEL="${3:-电信优选}"
+PORT=443
+if [ "$(uname -s)" = "Darwin" ]; then
+  OUT_DIR="${HOME}/Desktop/Cloudflare优选IP"
+else
+  OUT_DIR="${HOME}/Cloudflare优选IP"
+fi
+# 先按延迟取多少个候选，再用 curl 拿地区码 + 下载速度
+CANDIDATES="${CANDIDATES:-30}"
+
+mkdir -p "$OUT_DIR"
+
+echo "==> [1/2] TCP 延迟测速中（每地区 Top ${TOP_N}，延迟上限 200ms）..."
+# TCP 模式最稳；-dd 跳过 cfst 自带下载（403 重灾区，改用 curl 补测）
+if ! "$CFST_BIN" -dd -tl 200 -tlr 0.2 -n 100 -o result.csv; then
+  echo "!! CFST 延迟测速失败" >&2
+  exit 1
+fi
+if [ ! -f result.csv ]; then
+  echo "!! 未生成 result.csv，延迟测速可用 IP 为 0，请检查网络或代理是否已退出" >&2
+  exit 1
+fi
+
+echo "==> [2/2] 为延迟最低的 ${CANDIDATES} 个 IP 补测地区码 + 下载速度..."
+COLOS="$COLOS" TOP_N="$TOP_N" LABEL="$LABEL" PORT="$PORT" OUT_DIR="$OUT_DIR" \
+CANDIDATES="$CANDIDATES" DL_URL_HTTPS="$DL_URL_HTTPS" DL_URL_HTTP="$DL_URL_HTTP" \
+env -u PYTHONPATH python3 << 'PYEOF'
+import csv, os, collections, datetime, subprocess, re
+
+colo_csv = os.environ["COLOS"]
+top_n = int(os.environ["TOP_N"])
+label = os.environ["LABEL"]
+port = os.environ["PORT"]
+out_dir = os.environ["OUT_DIR"]
+candidates_n = int(os.environ["CANDIDATES"])
+dl_https = os.environ["DL_URL_HTTPS"]
+dl_http = os.environ["DL_URL_HTTP"]
+
+REGION_NAMES = {
+    "HKG": "香港", "NRT": "东京", "KHH": "高雄", "TPE": "台北", "SIN": "新加坡",
+    "ICN": "首尔", "LAX": "洛杉矶", "SJC": "圣何塞", "SEA": "西雅图", "FRA": "法兰克福",
+    "ORD": "芝加哥", "DFW": "达拉斯", "ATL": "亚特兰大",
+}
+requested = [c.strip().upper() for c in colo_csv.split(",") if c.strip()]
+
+with open("result.csv", newline='', encoding='utf-8-sig') as f:
+    rows = list(csv.DictReader(f))
+
+# 按延迟从低到高取候选（已在 cfst 里过滤了 200ms / 丢包）
+cands = []
+for r in rows:
+    try:
+        lat = float(r.get("平均延迟") or 9999)
+    except ValueError:
+        continue
+    if lat > 200:
+        continue
+    cands.append((lat, (r.get("IP 地址") or "").strip()))
+cands = sorted(cands)[:candidates_n]
+if not cands:
+    print("!! 延迟 200ms 内无可用 IP")
+    raise SystemExit(1)
+
+def probe(ip):
+    """一次 curl 拿地区码 + 下载速度；先 HTTPS 2MB，失败再 HTTP 50MB。
+    返回 (colo, mbps, 方法)，colo 从响应头 colo: / CF-RAY 后缀取。"""
+    for url, resolve_port in ((dl_https, 443), (dl_http, 80)):
+        try:
+            r = subprocess.run(
+                ["curl", "-s", "-D", "-", "-o", "/dev/null",
+                 "-w", "\n%{http_code} %{speed_download}",
+                 "--max-time", "12",
+                 "--resolve", f"speed.cloudflare.com:{resolve_port}:{ip}", url],
+                capture_output=True, text=True, timeout=17)
+            out = r.stdout or ""
+            # 最后一行是 "200 123456"
+            last = out.strip().splitlines()[-1] if out.strip() else "0 0"
+            parts = last.split()
+            code = parts[0] if len(parts) > 0 else "0"
+            speed = float(parts[1]) if len(parts) > 1 else 0
+            mbps = speed * 8 / 1_000_000
+            # 地区码：优先响应头 colo:，其次 CF-RAY 后缀
+            m = re.search(r"(?im)^colo:\s*([A-Z]{3})\s*$", out)
+            colo = m.group(1) if m else None
+            if not colo:
+                m2 = re.search(r"CF-RAY:\s*[0-9a-f]+-([A-Z]{3})", out, re.I)
+                colo = m2.group(1).upper() if m2 else "N/A"
+            if code == "200":
+                return colo, mbps, ("https" if resolve_port == 443 else "http")
+        except Exception:
+            continue
+    return "N/A", 0.0, "fail"
+
+from concurrent.futures import ThreadPoolExecutor
+with ThreadPoolExecutor(max_workers=10) as ex:
+    probed = list(ex.map(lambda c: probe(c[1]), cands))
+
+# 按地区分组
+groups = collections.defaultdict(list)
+for (lat, ip), (colo, mbps, _method) in zip(cands, probed):
+    groups[colo].append((lat, ip, mbps))
+
+date_str = datetime.date.today().strftime("%Y-%m-%d")
+lines = [f"Cloudflare 优选 IP（{date_str}）", "=" * 60]
+
+for colo in requested:
+    name = REGION_NAMES.get(colo, colo)
+    if colo not in groups:
+        lines.append(f"# {colo}（{name}）: 本轮未测到可用 IP")
+        continue
+    top = sorted(groups[colo], key=lambda x: x[0])[:top_n]
+    lines.append(f"# {colo}（{name}）:")
+    with open(os.path.join(out_dir, f"{colo}-{name}.txt"), "w", encoding="utf-8") as f:
+        f.write(f"# {colo}（{name}）Cloudflare 优选 IP Top{len(top)}（{date_str}）\n")
+        for lat, ip, mbps in top:
+            tag = f"{mbps:.2f}Mbps" if mbps > 0 else "下载0"
+            line = f"{ip}:{port}#{colo} {label}[{lat:.0f}ms {tag}]"
+            lines.append(line)
+            f.write(line + "\n")
+
+# 其余地区（不在请求列表里的）也汇总到文件末尾，方便参考
+extra = [c for c in groups if c not in requested and c != "N/A"]
+if extra:
+    lines.append("# 其他地区（本轮测到，供参考）:")
+    for colo in sorted(extra):
+        for lat, ip, mbps in sorted(groups[colo], key=lambda x: x[0])[:2]:
+            tag = f"{mbps:.2f}Mbps" if mbps > 0 else "下载0"
+            lines.append(f"{ip}:{port}#{colo} {label}[{lat:.0f}ms {tag}]")
+
+with open(os.path.join(out_dir, "最优IP-汇总.txt"), "w", encoding="utf-8") as f:
+    f.write("\n".join(lines) + "\n")
+
+with open(os.path.join(out_dir, "全部结果.csv"), "w", encoding="utf-8-sig", newline="") as f:
+    w = csv.writer(f)
+    w.writerow(["IP地址", "平均延迟(ms)", "下载速度(Mbps)", "地区码"])
+    for (lat, ip), (colo, mbps, _m) in zip(cands, probed):
+        w.writerow([ip, f"{lat:.2f}", f"{mbps:.2f}", colo])
+
+print("\n".join(lines))
+print(f"\n✅ 已更新: {out_dir}")
+print("   说明：下载 0 的已标注；若全部为 0，说明下载测速地址仍被拦，请换时间或换网络再测")
+PYEOF
+echo "==> 完成"
