@@ -52,7 +52,10 @@ else
 fi
 # 先按延迟取多少个候选，再用 curl 拿地区码 + 下载速度
 # 2026-11-11 改大：候选 30→50，抽样 -n 100→200，基数大了更容易抓到更快的
+# 2026-11-11 用户实测：只有 172.64 开头的能在小火箭里通，162.159/104.18 全超时，
+#   所以只保留 172.64.*，其他段就算延迟低也不要
 CANDIDATES="${CANDIDATES:-50}"
+IP_PREFIX="${IP_PREFIX:-172.64.}"
 
 mkdir -p "$OUT_DIR"
 
@@ -69,7 +72,7 @@ fi
 
 echo "==> [2/2] 为延迟最低的 ${CANDIDATES} 个 IP 补测地区码 + 下载速度（trace 拿地区 + bytes=0 预检 + 下载）..."
 COLOS="$COLOS" TOP_N="$TOP_N" PORT="$PORT" OUT_DIR="$OUT_DIR" \
-CANDIDATES="$CANDIDATES" DL_URL_HTTPS="$DL_URL_HTTPS" DL_URL_HTTP="$DL_URL_HTTP" \
+CANDIDATES="$CANDIDATES" IP_PREFIX="$IP_PREFIX" DL_URL_HTTPS="$DL_URL_HTTPS" DL_URL_HTTP="$DL_URL_HTTP" \
 env -u PYTHONPATH python3 << 'PYEOF'
 import csv, os, collections, datetime, subprocess, re
 
@@ -78,6 +81,7 @@ top_n = int(os.environ["TOP_N"])
 port = os.environ["PORT"]
 out_dir = os.environ["OUT_DIR"]
 candidates_n = int(os.environ["CANDIDATES"])
+ip_prefix = os.environ.get("IP_PREFIX", "172.64.")
 dl_https = os.environ["DL_URL_HTTPS"]
 dl_http = os.environ["DL_URL_HTTP"]
 
@@ -101,6 +105,7 @@ with open("result.csv", newline='', encoding='utf-8-sig') as f:
     rows = list(csv.DictReader(f))
 
 # 按延迟从低到高取候选（已在 cfst 里过滤了 200ms / 丢包）
+# 只保留 172.64.*（用户实测只有这段能在小火箭里通），先过滤再取 Top N
 cands = []
 for r in rows:
     try:
@@ -109,10 +114,13 @@ for r in rows:
         continue
     if lat > 200:
         continue
-    cands.append((lat, (r.get("IP 地址") or "").strip()))
+    ip = (r.get("IP 地址") or "").strip()
+    if ip_prefix and not ip.startswith(ip_prefix):
+        continue
+    cands.append((lat, ip))
 cands = sorted(cands)[:candidates_n]
 if not cands:
-    print("!! 延迟 200ms 内无可用 IP")
+    print(f"!! 延迟 200ms 内无 {ip_prefix}* 可用 IP")
     raise SystemExit(1)
 
 def get_colo(ip):
