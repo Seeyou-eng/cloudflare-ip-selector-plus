@@ -21,6 +21,10 @@
 - 改用小文件 curl 补测下载：先试 HTTPS 2MB，403 / 0 速度时再试 HTTP 50MB（80 端口，绕 SNI 阻断）
 - 延迟 200ms 以上直接过滤，下载为 0 的照实标注，不藏着
 
+**2026-11-11 对比其他项目后的改进（CloudFlareScan / ip-optimizer）：**
+- 地区码改用 `/cdn-cgi/trace` 拿（几百字节），不用下 2MB 再从响应头里抠 `colo:`，轻、快、不吃 403
+- 先用 `/__down?bytes=0` 预检（流量为 0），通了再下真的文件，失败原因分得清
+
 ## 快速开始（macOS Apple Silicon）
 
 ```bash
@@ -68,6 +72,7 @@ Cloudflare 优选 IP（2026-11-10）
 
 - 2026-11-10（厦门电信，Mac）：`cf.xiu2.xyz/url` 和 `https://speed.cloudflare.com/__down?bytes=300000000` 均报 HTTP 403，cfst 自带下载全为 0；`curl --resolve` 测 `https://speed.cloudflare.com/__down?bytes=2000000` 返回 200，`http://speed.cloudflare.com/__down?bytes=50000000` 返回 200。本项目据此改为 curl 小文件补测 + HTTP 兜底。
 - 2026-11-10（本机 Linux，脚本逻辑跑通）：TCP 延迟测速 5955 个 IP 全部可用，curl 补测拿到地区码 + 下载速度 1.87-13.69 Mbps，输出 `最优IP-汇总.txt` / `全部结果.csv` 格式正确。因本机在美国，地区码为 ATL / DFW / LAX 等，SIN 未测到属正常；在厦门电信的 Mac 上应为 SIN / NRT，待用户在自己电脑上验证后为准。
+- 2026-11-11（本机 Linux，新探针验证）：`/cdn-cgi/trace` 拿地区码通过（162.159.38.239 → DEN、104.18.35.43 → ORD、108.162.198.113 → MIA），`/__down?bytes=0` 预检全部通过，几百字节 + 0 流量，比原来下 2MB 拿地区码轻得多。
 
 ## 致谢
 

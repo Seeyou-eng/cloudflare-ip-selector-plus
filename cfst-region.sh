@@ -13,8 +13,12 @@
 #      改为 curl 小文件补测：先 HTTPS 2MB，403/0 再试 HTTP 50MB
 #      （80 端口，绕 SNI 阻断）
 #   3. cfst 的 -httping 模式在部分网络下可用 IP 为 0（本机 Linux
-#      实测），改用 TCP 延迟测速（最稳）+ curl 响应头拿地区码：
-#      curl --resolve 拿到的响应头里有 `colo: SIN` 和 `CF-RAY: …-SIN`
+#      实测），改用 TCP 延迟测速（最稳）+ curl 补测
+#  2026-11-11 对比其他项目后的改进（CloudFlareScan / ip-optimizer）：
+#   4. 地区码改用 /cdn-cgi/trace 拿（几百字节），不用下 2MB 再从
+#      响应头里抠 colo:，轻、快、不吃 403
+#   5. 先用 /__down?bytes=0 预检（流量为 0），通了再下真的文件，
+#      失败原因分得清：预检不通是连通性问题，下载 0 是测速地址问题
 #
 #  用法：
 #    ./cfst-region.sh                      # 默认 SIN,NRT,HKG，每地区 Top 4
@@ -62,7 +66,7 @@ if [ ! -f result.csv ]; then
   exit 1
 fi
 
-echo "==> [2/2] 为延迟最低的 ${CANDIDATES} 个 IP 补测地区码 + 下载速度..."
+echo "==> [2/2] 为延迟最低的 ${CANDIDATES} 个 IP 补测地区码 + 下载速度（trace 拿地区 + bytes=0 预检 + 下载）..."
 COLOS="$COLOS" TOP_N="$TOP_N" PORT="$PORT" OUT_DIR="$OUT_DIR" \
 CANDIDATES="$CANDIDATES" DL_URL_HTTPS="$DL_URL_HTTPS" DL_URL_HTTP="$DL_URL_HTTP" \
 env -u PYTHONPATH python3 << 'PYEOF'
@@ -110,35 +114,65 @@ if not cands:
     print("!! 延迟 200ms 内无可用 IP")
     raise SystemExit(1)
 
-def probe(ip):
-    """一次 curl 拿地区码 + 下载速度；先 HTTPS 2MB，失败再 HTTP 50MB。
-    返回 (colo, mbps, 方法)，colo 从响应头 colo: / CF-RAY 后缀取。"""
+def get_colo(ip):
+    """用 /cdn-cgi/trace 拿地区码，几百字节，不用下载。
+    先 HTTPS 443，失败再试 HTTP 80，解析回包里的 colo=XXX。"""
+    for scheme, resolve_port in (("https", 443), ("http", 80)):
+        try:
+            r = subprocess.run(
+                ["curl", "-s", "--max-time", "5",
+                 "--resolve", f"speed.cloudflare.com:{resolve_port}:{ip}",
+                 f"{scheme}://speed.cloudflare.com/cdn-cgi/trace"],
+                capture_output=True, text=True, timeout=8)
+            m = re.search(r"(?m)^colo=([A-Z]{3})\s*$", r.stdout or "")
+            if m:
+                return m.group(1)
+        except Exception:
+            continue
+    return "N/A"
+
+def precheck(ip):
+    """用 /__down?bytes=0 预检，流量为 0，只验 HTTP 层通不通。
+    先 HTTPS，失败再试 HTTP，返回 True/False。"""
+    for scheme, resolve_port in (("https", 443), ("http", 80)):
+        try:
+            r = subprocess.run(
+                ["curl", "-s", "-o", "/dev/null", "-w", "%{http_code}",
+                 "--max-time", "5",
+                 "--resolve", f"speed.cloudflare.com:{resolve_port}:{ip}",
+                 f"{scheme}://speed.cloudflare.com/__down?bytes=0"],
+                capture_output=True, text=True, timeout=8)
+            if (r.stdout or "").strip() == "200":
+                return True
+        except Exception:
+            continue
+    return False
+
+def download_mbps(ip):
+    """下载测速：先 HTTPS 2MB，403/0 再试 HTTP 50MB，返回 Mbps。"""
     for url, resolve_port in ((dl_https, 443), (dl_http, 80)):
         try:
             r = subprocess.run(
-                ["curl", "-s", "-D", "-", "-o", "/dev/null",
-                 "-w", "\n%{http_code} %{speed_download}",
+                ["curl", "-s", "-o", "/dev/null",
+                 "-w", "%{http_code} %{speed_download}",
                  "--max-time", "12",
                  "--resolve", f"speed.cloudflare.com:{resolve_port}:{ip}", url],
                 capture_output=True, text=True, timeout=17)
-            out = r.stdout or ""
-            # 最后一行是 "200 123456"
-            last = out.strip().splitlines()[-1] if out.strip() else "0 0"
-            parts = last.split()
-            code = parts[0] if len(parts) > 0 else "0"
-            speed = float(parts[1]) if len(parts) > 1 else 0
-            mbps = speed * 8 / 1_000_000
-            # 地区码：优先响应头 colo:，其次 CF-RAY 后缀
-            m = re.search(r"(?im)^colo:\s*([A-Z]{3})\s*$", out)
-            colo = m.group(1) if m else None
-            if not colo:
-                m2 = re.search(r"CF-RAY:\s*[0-9a-f]+-([A-Z]{3})", out, re.I)
-                colo = m2.group(1).upper() if m2 else "N/A"
-            if code == "200":
-                return colo, mbps, ("https" if resolve_port == 443 else "http")
+            parts = (r.stdout or "").strip().split()
+            if len(parts) >= 2 and parts[0] == "200":
+                return float(parts[1]) * 8 / 1_000_000
         except Exception:
             continue
-    return "N/A", 0.0, "fail"
+    return 0.0
+
+def probe(ip):
+    """三步：trace 拿地区码 -> bytes=0 预检 -> 下载测速。
+    返回 (colo, mbps, 方法)。"""
+    colo = get_colo(ip)
+    if not precheck(ip):
+        return colo, 0.0, "precheck-fail"
+    mbps = download_mbps(ip)
+    return colo, mbps, "ok"
 
 from concurrent.futures import ThreadPoolExecutor
 with ThreadPoolExecutor(max_workers=10) as ex:
@@ -187,6 +221,6 @@ with open(os.path.join(out_dir, "全部结果.csv"), "w", encoding="utf-8-sig", 
 
 print("\n".join(lines))
 print(f"\n✅ 已更新: {out_dir}")
-print("   说明：下载速度记在 全部结果.csv 里；若下载全为 0，说明测速地址仍被拦，请换时间或换网络再测")
+print("   说明：地区码来自 /cdn-cgi/trace，下载速度记在 全部结果.csv 里；预检不通的下载记为 0，若下载全为 0，说明测速地址仍被拦，请换时间或换网络再测")
 PYEOF
 echo "==> 完成"
