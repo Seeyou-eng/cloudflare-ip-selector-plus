@@ -24,6 +24,7 @@
 **2026-11-11 对比其他项目后的改进（CloudFlareScan / ip-optimizer）：**
 - 地区码改用 `/cdn-cgi/trace` 拿（几百字节），不用下 2MB 再从响应头里抠 `colo:`，轻、快、不吃 403
 - 先用 `/__down?bytes=0` 预检（流量为 0），通了再下真的文件，失败原因分得清
+- 候选从 30 个提到 50 个，每段抽样从 100 个提到 200 个，基数大了更容易抓到更快的；默认仍测 SIN,NRT,HKG，不单独只测 HKG
 
 ## 快速开始（macOS Apple Silicon）
 
@@ -33,7 +34,7 @@ cd cloudflare-ip-selector-plus
 chmod +x install.sh cfst-region.sh   # GitHub 克隆后须先加执行权限
 ./install.sh        # 自动下载 cfst v2.3.5（Darwin arm64）
 # 国内网络加速: MIRROR='https://ghfast.top/' ./install.sh
-./cfst-region.sh    # 开始测速，约 3 分钟
+./cfst-region.sh    # 开始测速，约 5 分钟（候选 50 个，每段抽样 200 个）
 ```
 
 ## 用法

@@ -51,13 +51,14 @@ else
   OUT_DIR="${HOME}/Cloudflare优选IP"
 fi
 # 先按延迟取多少个候选，再用 curl 拿地区码 + 下载速度
-CANDIDATES="${CANDIDATES:-30}"
+# 2026-11-11 改大：候选 30→50，抽样 -n 100→200，基数大了更容易抓到更快的
+CANDIDATES="${CANDIDATES:-50}"
 
 mkdir -p "$OUT_DIR"
 
 echo "==> [1/2] TCP 延迟测速中（每地区 Top ${TOP_N}，延迟上限 200ms）..."
 # TCP 模式最稳；-dd 跳过 cfst 自带下载（403 重灾区，改用 curl 补测）
-if ! "$CFST_BIN" -dd -tl 200 -tlr 0.2 -n 100 -o result.csv; then
+if ! "$CFST_BIN" -dd -tl 200 -tlr 0.2 -n 200 -o result.csv; then
   echo "!! CFST 延迟测速失败" >&2
   exit 1
 fi
